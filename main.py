@@ -80,7 +80,20 @@ async def checar_aniversarios():
                     member = guild.get_member(int(user_id))
                     if member and info["data"] == data_hoje:
                         achou_no_servidor = True
-                        await canal.send(f"🎂 Hoje é aniversário de {info['nome']}! Desejem os parabéns! 🎉")
+                        
+                        # --- INÍCIO DA ATUALIZAÇÃO PARA ENVIAR COM EMBED ---
+                        embed_aniversario = discord.Embed(
+                            title=f"🎉 Feliz Aniversário, {info['nome']}! 🎂",
+                            description=f"Hoje é o dia de celebrar o nosso querido(a) **{info['nome']}**! Desejamos um dia cheio de alegria, paz e muitos presentes! ✨",
+                            color=discord.Color.gold() # Cor do embed (amarelo dourado)
+                        )
+                        # Adiciona a foto de perfil do aniversariante
+                        embed_aniversario.set_thumbnail(url=member.display_avatar.url) 
+                        embed_aniversario.set_footer(text="Que este novo ciclo seja incrível!")
+
+                        await canal.send(content=f"Parabéns, {member.mention}!", embed=embed_aniversario)
+                        # --- FIM DA ATUALIZAÇÃO ---
+
                         print(f"🎉 Parabéns enviados para {info['nome']} no servidor {guild.name}")
 
                 if not achou_no_servidor:
@@ -188,7 +201,7 @@ async def on_message(message):
 
     # p!removeraniversario (remove o próprio)
     if message.content.startswith("p!removeraniversario"):
-        with open(ARQUivo_ANIVERSARIOS, "r") as f:
+        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
             aniversarios = json.load(f)
 
         user_id = str(message.author.id)
