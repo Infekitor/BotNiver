@@ -6,6 +6,8 @@ import datetime
 from datetime import timezone, timedelta
 from flask import Flask
 from threading import Thread
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure
 
 # --- KEEP ALIVE ---
 app = Flask('')
@@ -19,52 +21,88 @@ def keep_alive():
 
 # --- DISCORD BOT ---
 
+# Configurações do MongoDB
+# O URI de conexão será obtido das variáveis de ambiente do Render
+MONGO_URI = os.getenv("MONGO_URI")
+print(f"DEBUG: MONGO_URI lido: {MONGO_URI}") # <--- LINHA DE DEPURÇÃO ADICIONADA AQUI
+
+db_client = None # Variável global para o cliente do MongoDB
+db_collection_aniversarios = None
+db_collection_config = None
+
+def connect_to_mongodb():
+    global db_client, db_collection_aniversarios, db_collection_config
+    try:
+        if MONGO_URI is None or MONGO_URI == "": # Adicionado verificação para string vazia
+            print("❌ Erro: Variável de ambiente MONGO_URI não configurada ou vazia!")
+            return False
+
+        db_client = MongoClient(MONGO_URI)
+        # Teste a conexão
+        db_client.admin.command('ping')
+        print("✅ Conectado ao MongoDB Atlas!")
+        db = db_client["powerniver_db"] # Nome do seu banco de dados
+        db_collection_aniversarios = db["aniversarios"] # Coleção para os aniversários
+        db_collection_config = db["config"] # Coleção para as configurações do servidor (canais)
+        return True
+    except ConnectionFailure as e:
+        print(f"❌ Falha ao conectar ao MongoDB Atlas: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ Erro inesperado ao conectar ao MongoDB: {e}")
+        return False
+
+# Inicializa a conexão com o MongoDB logo no início
+connect_to_mongodb()
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True  # EXPLICITAMENTE ATIVAR A INTENT DE MEMBROS
 intents.presences = True # Também é bom garantir que presences esteja ativa para ver status, se necessário para outras coisas.
 
-# Configura o cliente com as intents e cache de membros
 client = discord.Client(intents=intents, member_cache_flags=discord.MemberCacheFlags.all())
-
-# Arquivos para armazenar dados
-ARQUIVO_ANIVERSARIOS = "aniversarios.json"
-ARQUIVO_CONFIG = "config.json" # Novo arquivo para configurações do servidor
-
-# Cria arquivos se não existirem
-if not os.path.exists(ARQUIVO_ANIVERSARIOS):
-    with open(ARQUIVO_ANIVERSARIOS, "w") as f:
-        json.dump({}, f)
-
-if not os.path.exists(ARQUIVO_CONFIG):
-    with open(ARQUIVO_CONFIG, "w") as f:
-        json.dump({}, f) # Estrutura: {"guild_id": {"channel_id": "..."}}
 
 async def checar_aniversarios():
     await client.wait_until_ready()
     print("Iniciando checagem de aniversários...")
 
     while not client.is_closed():
-        # Define o fuso horário para Brasília (UTC-3)
+        # Reconnecta ao MongoDB se a conexão estiver perdida
+        if db_client is None:
+            print("Attempting to reconnect to MongoDB...")
+            if not connect_to_mongodb():
+                await asyncio.sleep(60) # Espera 1 minuto antes de tentar novamente se a conexão falhar
+                continue
+
         fuso_horario_brasilia = timezone(timedelta(hours=-3))
         hoje = datetime.datetime.now(fuso_horario_brasilia)
         data_hoje = hoje.strftime("%d/%m")
         print(f"🔎 Checando aniversários para: {data_hoje}")
 
-        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
-            aniversarios = json.load(f)
+        try: # Bloco try-except para lidar com erros na leitura do DB
+            # Carrega aniversários do MongoDB
+            aniversarios_cursor = db_collection_aniversarios.find({})
+            aniversarios = {doc['_id']: doc for doc in aniversarios_cursor}
 
-        with open(ARQUIVO_CONFIG, "r") as f:
-            configuracoes = json.load(f)
+            # Carrega configurações do MongoDB
+            configuracoes_cursor = db_collection_config.find({})
+            configuracoes = {doc['_id']: doc for doc in configuracoes_cursor}
+        except Exception as e:
+            print(f"❌ Erro ao carregar dados do MongoDB: {e}")
+            aniversarios = {}
+            configuracoes = {}
+            # Tentar reconectar ou pular essa iteração se o DB não estiver disponível
+            if not connect_to_mongodb():
+                await asyncio.sleep(60) # Espera 1 minuto antes de tentar novamente
+            continue # Pula para a próxima iteração do loop
 
         for guild in client.guilds:
-            # CORREÇÃO: Usando guild.chunk() para garantir que o cache de membros esteja completo
             try:
-                await guild.chunk() # Garante que o cache de membros do servidor esteja completo
+                await guild.chunk()
                 print(f"🔄 Cache de membros carregado para o servidor: {guild.name} ({len(guild.members)} membros no cache)")
             except discord.Forbidden:
                 print(f"⚠️ Sem permissão para carregar membros no servidor {guild.name}. Verifique as intents do bot.")
-                continue # Pula para o próximo servidor se não tiver permissão
+                continue
 
             guild_id = str(guild.id)
             if guild_id in configuracoes and "channel_id" in configuracoes[guild_id]:
@@ -80,19 +118,16 @@ async def checar_aniversarios():
                     member = guild.get_member(int(user_id))
                     if member and info["data"] == data_hoje:
                         achou_no_servidor = True
-                        
-                        # --- INÍCIO DA ATUALIZAÇÃO PARA ENVIAR COM EMBED ---
+
                         embed_aniversario = discord.Embed(
                             title=f"🎉 Feliz Aniversário, {info['nome']}! 🎂",
                             description=f"Hoje é o dia de celebrar o nosso querido(a) **{info['nome']}**! Desejamos um dia cheio de alegria, paz e muitos presentes! ✨",
-                            color=discord.Color.gold() # Cor do embed (amarelo dourado)
+                            color=discord.Color.gold()
                         )
-                        # Adiciona a foto de perfil do aniversariante
-                        embed_aniversario.set_thumbnail(url=member.display_avatar.url) 
+                        embed_aniversario.set_thumbnail(url=member.display_avatar.url)
                         embed_aniversario.set_footer(text="Que este novo ciclo seja incrível!")
 
                         await canal.send(content=f"Parabéns, {member.mention}!", embed=embed_aniversario)
-                        # --- FIM DA ATUALIZAÇÃO ---
 
                         print(f"🎉 Parabéns enviados para {info['nome']} no servidor {guild.name}")
 
@@ -111,6 +146,11 @@ async def on_ready():
 @client.event
 async def on_message(message):
     if message.author == client.user:
+        return
+
+    # Certifica-se de que o MongoDB está conectado antes de processar comandos
+    if db_client is None:
+        await message.channel.send(embed=criar_embed("Erro de Conexão", "❌ O bot não conseguiu se conectar ao banco de dados. Tente novamente mais tarde ou contate o administrador.", discord.Color.red()))
         return
 
     def criar_embed(titulo, descricao, cor=discord.Color.purple()):
@@ -150,22 +190,20 @@ async def on_message(message):
             await message.channel.send(embed=criar_embed("Erro", "❌ Data inválida. Use o formato DD/MM.", discord.Color.red()))
             return
 
-        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
-            aniversarios = json.load(f)
+        # Salva no MongoDB
+        try:
+            db_collection_aniversarios.update_one(
+                {"_id": str(message.author.id)}, # ID do usuário como chave única
+                {"$set": {"nome": message.author.display_name, "data": data}}, # Dados a salvar
+                upsert=True # Insere se não existir, atualiza se existir
+            )
+            await message.channel.send(embed=criar_embed("Aniversário Registrado", f"🎉 Aniversário de {message.author.mention} registrado como {data}!", discord.Color.green()))
+        except Exception as e:
+            await message.channel.send(embed=criar_embed("Erro no DB", f"❌ Não foi possível registrar o aniversário: {e}", discord.Color.red()))
 
-        aniversarios[str(message.author.id)] = {
-            "nome": message.author.display_name,
-            "data": data
-        }
-
-        with open(ARQUIVO_ANIVERSARIOS, "w") as f:
-            json.dump(aniversarios, f, indent=2)
-
-        await message.channel.send(embed=criar_embed("Aniversário Registrado", f"🎉 Aniversário de {message.author.mention} registrado como {data}!", discord.Color.green()))
 
     # p!aniversariantes (lista todos os membros do servidor atual)
     if message.content.startswith("p!aniversariantes"):
-        # Garante que o cache de membros esteja atualizado para o servidor atual
         if message.guild:
             try:
                 await message.guild.chunk()
@@ -174,24 +212,29 @@ async def on_message(message):
                 await message.channel.send(embed=criar_embed("Erro de Permissão", "❌ O bot não tem permissão para carregar a lista completa de membros. Verifique as intents e permissões.", discord.Color.red()))
                 return
 
-        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
-            aniversarios = json.load(f)
+        try:
+            # Carrega aniversários do MongoDB
+            aniversarios_cursor = db_collection_aniversarios.find({})
+            aniversarios = {doc['_id']: doc for doc in aniversarios_cursor}
+        except Exception as e:
+            await message.channel.send(embed=criar_embed("Erro no DB", f"❌ Não foi possível carregar a lista de aniversários: {e}", discord.Color.red()))
+            aniversarios = {}
+
 
         if not aniversarios:
             await message.channel.send(embed=criar_embed("Lista de Aniversariantes", "📭 Nenhum aniversário registrado ainda.", discord.Color.orange()))
             return
 
         embed = discord.Embed(title="📅 Lista de Aniversariantes", color=discord.Color.purple())
-        aniversariantes_do_servidor = [] 
+        aniversariantes_do_servidor = []
         for user_id, info in aniversarios.items():
             member = message.guild.get_member(int(user_id))
-            if member: # Se o membro for encontrado no servidor
+            if member:
                 aniversariantes_do_servidor.append(info)
-        
-        # Ordena a lista de aniversariantes por mês e depois por dia
+
         aniversariantes_do_servidor.sort(key=lambda x: (int(x['data'].split('/')[1]), int(x['data'].split('/')[0])))
 
-        if not aniversariantes_do_servidor: 
+        if not aniversariantes_do_servidor:
             await message.channel.send(embed=criar_embed("Lista de Aniversariantes", "📭 Nenhum aniversário registrado para este servidor ainda.", discord.Color.orange()))
         else:
             for info in aniversariantes_do_servidor:
@@ -201,26 +244,32 @@ async def on_message(message):
 
     # p!removeraniversario (remove o próprio)
     if message.content.startswith("p!removeraniversario"):
-        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
-            aniversarios = json.load(f)
-
         user_id = str(message.author.id)
 
-        if user_id in aniversarios:
-            del aniversarios[user_id]
-            with open(ARQUIVO_ANIVERSARIOS, "w") as f:
-                json.dump(aniversarios, f, indent=2)
-            await message.channel.send(embed=criar_embed("Removido", "🗑️ Seu aniversário foi removido da lista.", discord.Color.green()))
-        else:
-            await message.channel.send(embed=criar_embed("Aviso", "⚠️ Você não tinha um aniversário registrado.", discord.Color.orange()))
+        try:
+            # Remove do MongoDB
+            result = db_collection_aniversarios.delete_one({"_id": user_id})
+
+            if result.deleted_count > 0:
+                await message.channel.send(embed=criar_embed("Removido", "🗑️ Seu aniversário foi removido da lista.", discord.Color.green()))
+            else:
+                await message.channel.send(embed=criar_embed("Aviso", "⚠️ Você não tinha um aniversário registrado.", discord.Color.orange()))
+        except Exception as e:
+            await message.channel.send(embed=criar_embed("Erro no DB", f"❌ Não foi possível remover o aniversário: {e}", discord.Color.red()))
 
     # p!proximoaniversario (próximo aniversário)
     if message.content.startswith("p!proximoaniversario"):
         fuso_horario_brasilia = timezone(timedelta(hours=-3))
         hoje = datetime.datetime.now(fuso_horario_brasilia)
 
-        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
-            aniversarios = json.load(f)
+        try:
+            # Carrega aniversários do MongoDB
+            aniversarios_cursor = db_collection_aniversarios.find({})
+            aniversarios = {doc['_id']: doc for doc in aniversarios_cursor}
+        except Exception as e:
+            await message.channel.send(embed=criar_embed("Erro no DB", f"❌ Não foi possível carregar a lista de aniversários: {e}", discord.Color.red()))
+            aniversarios = {}
+
 
         if not aniversarios:
             await message.channel.send(embed=criar_embed("Próximo Aniversário", "📭 Nenhum aniversário registrado.", discord.Color.orange()))
@@ -229,29 +278,25 @@ async def on_message(message):
         def dias_faltando(data_str):
             d, m = map(int, data_str.split("/"))
             ano = hoje.year
-            
-            # Tenta com o ano atual
+
             data_aniver_este_ano = datetime.datetime(ano, m, d, tzinfo=fuso_horario_brasilia)
-            
-            # Se o aniversário já passou este ano, calcula para o próximo ano
+
             if data_aniver_este_ano < hoje:
                 data_aniver_este_ano = datetime.datetime(ano + 1, m, d, tzinfo=fuso_horario_brasilia)
-            
+
             return (data_aniver_este_ano - hoje).days
 
-        # Filtra aniversários para considerar apenas membros do servidor atual
         aniversarios_do_servidor = {
-            uid: info for uid, info in aniversarios.items()  
-            if message.guild and message.guild.get_member(int(uid)) # Agora mais confiável com o cache completo
+            uid: info for uid, info in aniversarios.items()
+            if message.guild and message.guild.get_member(int(uid))
         }
 
         if not aniversarios_do_servidor:
             await message.channel.send(embed=criar_embed("Próximo Aniversário", "📭 Nenhum aniversário registrado para este servidor.", discord.Color.orange()))
             return
 
-        # Ordena para encontrar o mais próximo, garantindo que "hoje" ou "passado" seja ajustado
         proximos = sorted(aniversarios_do_servidor.items(), key=lambda x: dias_faltando(x[1]["data"]))
-        
+
         proximo_id, info = proximos[0]
         dias = dias_faltando(info["data"])
 
@@ -283,18 +328,16 @@ async def on_message(message):
             await message.channel.send(embed=criar_embed("Erro", "❌ Data inválida. Use o formato DD/MM.", discord.Color.red()))
             return
 
-        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
-            aniversarios = json.load(f)
-
-        aniversarios[str(membro.id)] = {
-            "nome": membro.display_name,
-            "data": data
-        }
-
-        with open(ARQUIVO_ANIVERSARIOS, "w") as f:
-            json.dump(aniversarios, f, indent=2)
-
-        await message.channel.send(embed=criar_embed("Aniversário Adicionado", f"🎉 Aniversário de {membro.mention} registrado como {data}!", discord.Color.green()))
+        try:
+            # Salva no MongoDB
+            db_collection_aniversarios.update_one(
+                {"_id": str(membro.id)},
+                {"$set": {"nome": membro.display_name, "data": data}},
+                upsert=True
+            )
+            await message.channel.send(embed=criar_embed("Aniversário Adicionado", f"🎉 Aniversário de {membro.mention} registrado como {data}!", discord.Color.green()))
+        except Exception as e:
+            await message.channel.send(embed=criar_embed("Erro no DB", f"❌ Não foi possível adicionar o aniversário: {e}", discord.Color.red()))
 
     # p!setcanal (configura o canal de avisos)
     if message.content.startswith("p!setcanal"):
@@ -307,14 +350,11 @@ async def on_message(message):
             await message.channel.send(embed=criar_embed("Erro", "❌ Use assim: `p!setcanal #canal` ou `p!setcanal <ID_do_canal>`", discord.Color.red()))
             return
 
-        # Tenta obter o canal pela menção
         canal_selecionado = message.channel_mentions[0] if message.channel_mentions else None
 
-        # Se não houver menção, tenta pelo ID
         if not canal_selecionado:
             try:
                 canal_id_str = partes[1]
-                # Remove caracteres de menção de canal se presentes
                 canal_id = int(canal_id_str.replace('<#', '').replace('>', ''))
                 canal_selecionado = client.get_channel(canal_id)
             except ValueError:
@@ -325,24 +365,22 @@ async def on_message(message):
             await message.channel.send(embed=criar_embed("Erro", "❌ Canal não encontrado. Certifique-se de que o ID ou a menção estão corretos.", discord.Color.red()))
             return
 
-        if not message.guild: # Certifica-se de que o comando foi usado em um servidor
+        if not message.guild:
             await message.channel.send(embed=criar_embed("Erro", "❌ Este comando só pode ser usado em um servidor.", discord.Color.red()))
             return
 
         guild_id = str(message.guild.id)
 
-        with open(ARQUIVO_CONFIG, "r") as f:
-            configuracoes = json.load(f)
-
-        if guild_id not in configuracoes:
-            configuracoes[guild_id] = {}
-
-        configuracoes[guild_id]["channel_id"] = str(canal_selecionado.id)
-
-        with open(ARQUIVO_CONFIG, "w") as f:
-            json.dump(configuracoes, f, indent=2)
-
-        await message.channel.send(embed=criar_embed("Configuração Concluída", f"✅ O canal de avisos de aniversário foi definido para {canal_selecionado.mention}!", discord.Color.green()))
+        try:
+            # Salva no MongoDB
+            db_collection_config.update_one(
+                {"_id": guild_id},
+                {"$set": {"channel_id": str(canal_selecionado.id)}},
+                upsert=True
+            )
+            await message.channel.send(embed=criar_embed("Configuração Concluída", f"✅ O canal de avisos de aniversário foi definido para {canal_selecionado.mention}!", discord.Color.green()))
+        except Exception as e:
+            await message.channel.send(embed=criar_embed("Erro no DB", f"❌ Não foi possível configurar o canal: {e}", discord.Color.red()))
 
 
 # INICIA KEEP ALIVE E BOT
