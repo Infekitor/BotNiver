@@ -20,12 +20,14 @@ def keep_alive():
 
 # --- DISCORD BOT ---
 
+# NOVIDADE: Adicionado Intents.members = True e client.member_cache_flags para garantir acesso a todos os membros
 intents = discord.Intents.default()
 intents.message_content = True
-# Se você tiver problemas com o bot não vendo membros (ex: para comandos de aniversário),
-# pode ser necessário adicionar intents.members = True e ativar isso no Portal do Desenvolvedor Discord
-# intents.members = True 
-client = discord.Client(intents=intents)
+intents.members = True  # EXPLICITAMENTE ATIVAR A INTENT DE MEMBROS
+
+# Configura o cache de membros para incluir todos os membros ao iniciar
+# ou quando o bot se junta a um servidor.
+client = discord.Client(intents=intents, member_cache_flags=discord.MemberCacheFlags.all())
 
 # Arquivos para armazenar dados
 ARQUIVO_ANIVERSARIOS = "aniversarios.json"
@@ -58,6 +60,11 @@ async def checar_aniversarios():
             configuracoes = json.load(f)
 
         for guild in client.guilds:
+            # NOVIDADE: Requisita a lista completa de membros do servidor
+            # Isso é crucial para que guild.get_member funcione com todos os membros
+            await guild.query_members(limit=None) # Pega todos os membros do servidor
+            print(f"🔄 Carregando membros para o servidor: {guild.name} ({len(guild.members)} membros carregados)")
+
             guild_id = str(guild.id)
             if guild_id in configuracoes and "channel_id" in configuracoes[guild_id]:
                 canal_id = configuracoes[guild_id]["channel_id"]
@@ -70,6 +77,7 @@ async def checar_aniversarios():
                 achou_no_servidor = False
                 for user_id, info in aniversarios.items():
                     # Verifica se o usuário pertence a este servidor antes de enviar o parabéns
+                    # Agora, com guild.query_members, guild.get_member deve ser mais confiável
                     member = guild.get_member(int(user_id))
                     if member and info["data"] == data_hoje:
                         achou_no_servidor = True
@@ -153,17 +161,17 @@ async def on_message(message):
             return
 
         embed = discord.Embed(title="📅 Lista de Aniversariantes", color=discord.Color.purple())
-        # Cria uma lista temporária para os aniversariantes do servidor atual
-        aniversariantes_do_servidor = []
+        aniversariantes_do_servidor = [] 
         for user_id, info in aniversarios.items():
-            # Apenas mostra aniversários de membros que estão no servidor atual
-            if message.guild and message.guild.get_member(int(user_id)):
+            # Tenta pegar o membro do cache (que agora deve ser mais completo)
+            member = message.guild.get_member(int(user_id))
+            if member: # Se o membro for encontrado no servidor
                 aniversariantes_do_servidor.append(info)
         
         # Ordena a lista de aniversariantes por mês e depois por dia
         aniversariantes_do_servidor.sort(key=lambda x: (int(x['data'].split('/')[1]), int(x['data'].split('/')[0])))
 
-        if not aniversariantes_do_servidor: # Se não houver campos, significa que ninguém do servidor atual tem aniversário registrado
+        if not aniversariantes_do_servidor: 
             await message.channel.send(embed=criar_embed("Lista de Aniversariantes", "📭 Nenhum aniversário registrado para este servidor ainda.", discord.Color.orange()))
         else:
             for info in aniversariantes_do_servidor:
@@ -214,7 +222,7 @@ async def on_message(message):
         # Filtra aniversários para considerar apenas membros do servidor atual
         aniversarios_do_servidor = {
             uid: info for uid, info in aniversarios.items()  
-            if message.guild and message.guild.get_member(int(uid))
+            if message.guild and message.guild.get_member(int(uid)) # Agora mais confiável com o cache completo
         }
 
         if not aniversarios_do_servidor:
@@ -240,7 +248,7 @@ async def on_message(message):
             await message.channel.send(embed=criar_embed("Erro", "❌ Use assim: `p!addaniversario @usuario DD/MM`", discord.Color.red()))
             return
 
-        # CORREÇÃO: Removido o espaço extra na variável 'membro'
+        # CORREÇÃO: Variável 'membro' corretamente escrita
         membro = message.mentions[0] if message.mentions else None
         data = partes[2]
 
