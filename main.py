@@ -240,7 +240,8 @@ async def on_message(message):
             await message.channel.send(embed=criar_embed("Erro", "❌ Use assim: `p!addaniversario @usuario DD/MM`", discord.Color.red()))
             return
 
-        membr o = message.mentions[0] if message.mentions else None
+        # CORREÇÃO: Removido o espaço extra na variável 'membro'
+        membro = message.mentions[0] if message.mentions else None
         data = partes[2]
 
         if membro is None:
