@@ -1,0 +1,300 @@
+import discord
+import os
+import json
+import asyncio
+import datetime
+from datetime import timezone, timedelta
+from flask import Flask
+from threading import Thread
+
+# --- KEEP ALIVE ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "PowerNiver bot está rodando! 🎉"
+
+def keep_alive():
+    Thread(target=app.run, kwargs={'host': '00.0.0.0', 'port': 8080}).start() # Corrigi o host para 0.0.0.0
+
+# --- DISCORD BOT ---
+
+intents = discord.Intents.default()
+intents.message_content = True
+client = discord.Client(intents=intents)
+
+# Arquivos para armazenar dados
+ARQUIVO_ANIVERSARIOS = "aniversarios.json"
+ARQUIVO_CONFIG = "config.json" # Novo arquivo para configurações do servidor
+
+# Cria arquivos se não existirem
+if not os.path.exists(ARQUIVO_ANIVERSARIOS):
+    with open(ARQUIVO_ANIVERSARIOS, "w") as f:
+        json.dump({}, f)
+
+if not os.path.exists(ARQUIVO_CONFIG):
+    with open(ARQUIVO_CONFIG, "w") as f:
+        json.dump({}, f) # Estrutura: {"guild_id": {"channel_id": "..."}}
+
+async def checar_aniversarios():
+    await client.wait_until_ready()
+    print("Iniciando checagem de aniversários...")
+
+    while not client.is_closed():
+        hoje = datetime.datetime.now(timezone(timedelta(hours=-3)))
+        data_hoje = hoje.strftime("%d/%m")
+        print(f"🔎 Checando aniversários para: {data_hoje}")
+
+        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
+            aniversarios = json.load(f)
+
+        with open(ARQUIVO_CONFIG, "r") as f:
+            configuracoes = json.load(f)
+
+        for guild in client.guilds:
+            guild_id = str(guild.id)
+            if guild_id in configuracoes and "channel_id" in configuracoes[guild_id]:
+                canal_id = configuracoes[guild_id]["channel_id"]
+                canal = client.get_channel(int(canal_id))
+
+                if canal is None:
+                    print(f"❌ Canal não encontrado para o servidor {guild.name} (ID: {guild_id}). Verifique o ID configurado.")
+                    continue
+
+                achou_no_servidor = False
+                for user_id, info in aniversarios.items():
+                    # Verifica se o usuário pertence a este servidor antes de enviar o parabéns
+                    member = guild.get_member(int(user_id))
+                    if member and info["data"] == data_hoje:
+                        achou_no_servidor = True
+                        await canal.send(f"🎂 Hoje é aniversário de {info['nome']}! Desejem os parabéns! 🎉")
+                        print(f"🎉 Parabéns enviados para {info['nome']} no servidor {guild.name}")
+
+                if not achou_no_servidor:
+                    print(f"📭 Nenhum aniversariante hoje no servidor {guild.name}.")
+            else:
+                print(f"⚠️ Servidor {guild.name} (ID: {guild_id}) não tem um canal de aniversário configurado.")
+
+
+        await asyncio.sleep(3600)  # espera 1 hora antes de checar novamente
+
+@client.event
+async def on_ready():
+    print(f'✅ Bot conectado como {client.user}')
+    client.loop.create_task(checar_aniversarios())
+
+@client.event
+async def on_message(message):
+    if message.author == client.user:
+        return
+
+    def criar_embed(titulo, descricao, cor=discord.Color.purple()):
+        return discord.Embed(title=titulo, description=descricao, color=cor)
+
+    # p!help
+    if message.content == "p!help":
+        embed = criar_embed("Comandos do PowerNiver Bot", "Aqui estão todos os comandos que você pode usar:", discord.Color.blue())
+        embed.add_field(name="`p!help`", value="Exibe esta mensagem de ajuda.", inline=False)
+        embed.add_field(name="`p!ping`", value="Verifica se o bot está online.", inline=False)
+        embed.add_field(name="`p!aniversario DD/MM`", value="Registra seu aniversário no formato Dia/Mês (ex: `p!aniversario 25/12`).", inline=False)
+        embed.add_field(name="`p!aniversariantes`", value="Mostra a lista de todos os aniversários registrados neste servidor.", inline=False)
+        embed.add_field(name="`p!removeraniversario`", value="Remove seu aniversário da lista.", inline=False)
+        embed.add_field(name="`p!proximoaniversario`", value="Informa o próximo aniversário registrado neste servidor.", inline=False)
+        embed.add_field(name="`p!addaniversario @usuario DD/MM`", value="**(Apenas ADM)** Adiciona o aniversário de outro usuário (ex: `p!addaniversario @fulano 01/01`).", inline=False)
+        embed.add_field(name="`p!setcanal #canal`", value="**(Apenas ADM)** Define o canal onde o bot irá enviar os avisos de aniversário (ex: `p!setcanal #geral`).", inline=False)
+        embed.set_footer(text="Aproveite o bot de aniversários! 🎉")
+        await message.channel.send(embed=embed)
+
+    # p!ping
+    if message.content == "p!ping":
+        await message.channel.send(embed=criar_embed("Pong", "pong ✅", discord.Color.green()))
+
+    # p!aniversario (registrar o próprio aniversário)
+    if message.content.startswith("p!aniversario"):
+        partes = message.content.split()
+        if len(partes) != 2:
+            await message.channel.send(embed=criar_embed("Erro", "❌ Use assim: `p!aniversario DD/MM`", discord.Color.red()))
+            return
+
+        data = partes[1]
+        try:
+            dia, mes = map(int, data.split("/"))
+            if not (1 <= dia <= 31 and 1 <= mes <= 12):
+                raise ValueError
+        except ValueError:
+            await message.channel.send(embed=criar_embed("Erro", "❌ Data inválida. Use o formato DD/MM.", discord.Color.red()))
+            return
+
+        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
+            aniversarios = json.load(f)
+
+        aniversarios[str(message.author.id)] = {
+            "nome": message.author.display_name,
+            "data": data
+        }
+
+        with open(ARQUIVO_ANIVERSARIOS, "w") as f:
+            json.dump(aniversarios, f, indent=2)
+
+        await message.channel.send(embed=criar_embed("Aniversário Registrado", f"🎉 Aniversário de {message.author.mention} registrado como {data}!", discord.Color.green()))
+
+    # p!aniversariantes (lista todos)
+    if message.content.startswith("p!aniversariantes"):
+        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
+            aniversarios = json.load(f)
+
+        if not aniversarios:
+            await message.channel.send(embed=criar_embed("Lista de Aniversariantes", "📭 Nenhum aniversário registrado ainda.", discord.Color.orange()))
+            return
+
+        embed = discord.Embed(title="📅 Lista de Aniversariantes", color=discord.Color.purple())
+        for user_id, info in aniversarios.items():
+            # Apenas mostra aniversários de membros que estão no servidor atual
+            if message.guild and message.guild.get_member(int(user_id)):
+                embed.add_field(name=info["nome"], value=f"🎂 {info['data']}", inline=False)
+
+        if not embed.fields: # Se não houver campos, significa que ninguém do servidor atual tem aniversário registrado
+            await message.channel.send(embed=criar_embed("Lista de Aniversariantes", "📭 Nenhum aniversário registrado para este servidor ainda.", discord.Color.orange()))
+        else:
+            await message.channel.send(embed=embed)
+
+    # p!removeraniversario (remove o próprio)
+    if message.content.startswith("p!removeraniversario"):
+        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
+            aniversarios = json.load(f)
+
+        user_id = str(message.author.id)
+
+        if user_id in aniversarios:
+            del aniversarios[user_id]
+            with open(ARQUIVO_ANIVERSARIOS, "w") as f:
+                json.dump(aniversarios, f, indent=2)
+            await message.channel.send(embed=criar_embed("Removido", "🗑️ Seu aniversário foi removido da lista.", discord.Color.green()))
+        else:
+            await message.channel.send(embed=criar_embed("Aviso", "⚠️ Você não tinha um aniversário registrado.", discord.Color.orange()))
+
+    # p!proximoaniversario (próximo aniversário)
+    if message.content.startswith("p!proximoaniversario"):
+        hoje = datetime.datetime.now(timezone(timedelta(hours=-3)))
+
+        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
+            aniversarios = json.load(f)
+
+        if not aniversarios:
+            await message.channel.send(embed=criar_embed("Próximo Aniversário", "📭 Nenhum aniversário registrado.", discord.Color.orange()))
+            return
+
+        def dias_faltando(data):
+            d, m = map(int, data.split("/"))
+            ano = hoje.year
+            data_aniver = datetime.datetime(ano, m, d, tzinfo=timezone(timedelta(hours=-3)))
+            if data_aniver < hoje:
+                data_aniver = datetime.datetime(ano + 1, m, d, tzinfo=timezone(timedelta(hours=-3)))
+            return (data_aniver - hoje).days
+
+        # Filtra aniversários para considerar apenas membros do servidor atual
+        aniversarios_do_servidor = {
+            uid: info for uid, info in aniversarios.items() 
+            if message.guild and message.guild.get_member(int(uid))
+        }
+
+        if not aniversarios_do_servidor:
+            await message.channel.send(embed=criar_embed("Próximo Aniversário", "📭 Nenhum aniversário registrado para este servidor.", discord.Color.orange()))
+            return
+
+        proximos = sorted(aniversarios_do_servidor.items(), key=lambda x: dias_faltando(x[1]["data"]))
+        proximo_id, info = proximos[0]
+        dias = dias_faltando(info["data"])
+
+        await message.channel.send(embed=criar_embed("Próximo Aniversário", f"⏳ O próximo aniversário é de **{info['nome']}** em **{dias}** dia(s) — {info['data']} 🎉", discord.Color.green()))
+
+    # p!addaniversario @usuario DD/MM (ADM só)
+    if message.content.startswith("p!addaniversario"):
+        if not message.author.guild_permissions.administrator:
+            await message.channel.send(embed=criar_embed("Permissão Negada", "❌ Você precisa ser administrador para usar esse comando.", discord.Color.red()))
+            return
+
+        partes = message.content.split()
+        if len(partes) != 3:
+            await message.channel.send(embed=criar_embed("Erro", "❌ Use assim: `p!addaniversario @usuario DD/MM`", discord.Color.red()))
+            return
+
+        membro = message.mentions[0] if message.mentions else None
+        data = partes[2]
+
+        if membro is None:
+            await message.channel.send(embed=criar_embed("Erro", "❌ Você precisa mencionar um usuário válido.", discord.Color.red()))
+            return
+
+        try:
+            dia, mes = map(int, data.split("/"))
+            if not (1 <= dia <= 31 and 1 <= mes <= 12):
+                raise ValueError
+        except ValueError:
+            await message.channel.send(embed=criar_embed("Erro", "❌ Data inválida. Use o formato DD/MM.", discord.Color.red()))
+            return
+
+        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
+            aniversarios = json.load(f)
+
+        aniversarios[str(membro.id)] = {
+            "nome": membro.display_name,
+            "data": data
+        }
+
+        with open(ARQUIVO_ANIVERSARIOS, "w") as f:
+            json.dump(aniversarios, f, indent=2)
+
+        await message.channel.send(embed=criar_embed("Aniversário Adicionado", f"🎉 Aniversário de {membro.mention} registrado como {data}!", discord.Color.green()))
+
+    # p!setcanal (configura o canal de avisos)
+    if message.content.startswith("p!setcanal"):
+        if not message.author.guild_permissions.administrator:
+            await message.channel.send(embed=criar_embed("Permissão Negada", "❌ Você precisa ser administrador para usar esse comando.", discord.Color.red()))
+            return
+
+        partes = message.content.split()
+        if len(partes) < 2:
+            await message.channel.send(embed=criar_embed("Erro", "❌ Use assim: `p!setcanal #canal` ou `p!setcanal <ID_do_canal>`", discord.Color.red()))
+            return
+
+        # Tenta obter o canal pela menção
+        canal_selecionado = message.channel_mentions[0] if message.channel_mentions else None
+
+        # Se não houver menção, tenta pelo ID
+        if not canal_selecionado:
+            try:
+                canal_id_str = partes[1]
+                canal_id = int(canal_id_str.replace('<#', '').replace('>', '')) # Limpa se for menção
+                canal_selecionado = client.get_channel(canal_id)
+            except ValueError:
+                await message.channel.send(embed=criar_embed("Erro", "❌ Formato de ID de canal inválido. Use um ID numérico ou mencione o canal.", discord.Color.red()))
+                return
+
+        if not canal_selecionado:
+            await message.channel.send(embed=criar_embed("Erro", "❌ Canal não encontrado. Certifique-se de que o ID ou a menção estão corretos.", discord.Color.red()))
+            return
+
+        if not message.guild: # Certifica-se de que o comando foi usado em um servidor
+            await message.channel.send(embed=criar_embed("Erro", "❌ Este comando só pode ser usado em um servidor.", discord.Color.red()))
+            return
+
+        guild_id = str(message.guild.id)
+
+        with open(ARQUIVO_CONFIG, "r") as f:
+            configuracoes = json.load(f)
+
+        if guild_id not in configuracoes:
+            configuracoes[guild_id] = {}
+
+        configuracoes[guild_id]["channel_id"] = str(canal_selecionado.id)
+
+        with open(ARQUIVO_CONFIG, "w") as f:
+            json.dump(configuracoes, f, indent=2)
+
+        await message.channel.send(embed=criar_embed("Configuração Concluída", f"✅ O canal de avisos de aniversário foi definido para {canal_selecionado.mention}!", discord.Color.green()))
+
+
+# INICIA KEEP ALIVE E BOT
+keep_alive()
+client.run(os.getenv("DISCORD_TOKEN"))
