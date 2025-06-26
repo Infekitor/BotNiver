@@ -15,18 +15,16 @@ def home():
     return "PowerNiver bot está rodando! 🎉"
 
 def keep_alive():
-    # CORREÇÃO: Host alterado de '00.0.0.0' para '0.0.0.0'
     Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': 8080}).start()
 
 # --- DISCORD BOT ---
 
-# NOVIDADE: Adicionado Intents.members = True e client.member_cache_flags para garantir acesso a todos os membros
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True  # EXPLICITAMENTE ATIVAR A INTENT DE MEMBROS
+intents.presences = True # Também é bom garantir que presences esteja ativa para ver status, se necessário para outras coisas.
 
-# Configura o cache de membros para incluir todos os membros ao iniciar
-# ou quando o bot se junta a um servidor.
+# Configura o cliente com as intents e cache de membros
 client = discord.Client(intents=intents, member_cache_flags=discord.MemberCacheFlags.all())
 
 # Arquivos para armazenar dados
@@ -60,10 +58,13 @@ async def checar_aniversarios():
             configuracoes = json.load(f)
 
         for guild in client.guilds:
-            # NOVIDADE: Requisita a lista completa de membros do servidor
-            # Isso é crucial para que guild.get_member funcione com todos os membros
-            await guild.query_members(limit=None) # Pega todos os membros do servidor
-            print(f"🔄 Carregando membros para o servidor: {guild.name} ({len(guild.members)} membros carregados)")
+            # CORREÇÃO: Usando guild.chunk() para garantir que o cache de membros esteja completo
+            try:
+                await guild.chunk() # Garante que o cache de membros do servidor esteja completo
+                print(f"🔄 Cache de membros carregado para o servidor: {guild.name} ({len(guild.members)} membros no cache)")
+            except discord.Forbidden:
+                print(f"⚠️ Sem permissão para carregar membros no servidor {guild.name}. Verifique as intents do bot.")
+                continue # Pula para o próximo servidor se não tiver permissão
 
             guild_id = str(guild.id)
             if guild_id in configuracoes and "channel_id" in configuracoes[guild_id]:
@@ -76,8 +77,6 @@ async def checar_aniversarios():
 
                 achou_no_servidor = False
                 for user_id, info in aniversarios.items():
-                    # Verifica se o usuário pertence a este servidor antes de enviar o parabéns
-                    # Agora, com guild.query_members, guild.get_member deve ser mais confiável
                     member = guild.get_member(int(user_id))
                     if member and info["data"] == data_hoje:
                         achou_no_servidor = True
@@ -153,6 +152,15 @@ async def on_message(message):
 
     # p!aniversariantes (lista todos os membros do servidor atual)
     if message.content.startswith("p!aniversariantes"):
+        # Garante que o cache de membros esteja atualizado para o servidor atual
+        if message.guild:
+            try:
+                await message.guild.chunk()
+                print(f"🔄 Cache de membros recarregado para o comando: {message.guild.name} ({len(message.guild.members)} membros no cache)")
+            except discord.Forbidden:
+                await message.channel.send(embed=criar_embed("Erro de Permissão", "❌ O bot não tem permissão para carregar a lista completa de membros. Verifique as intents e permissões.", discord.Color.red()))
+                return
+
         with open(ARQUIVO_ANIVERSARIOS, "r") as f:
             aniversarios = json.load(f)
 
@@ -163,7 +171,6 @@ async def on_message(message):
         embed = discord.Embed(title="📅 Lista de Aniversariantes", color=discord.Color.purple())
         aniversariantes_do_servidor = [] 
         for user_id, info in aniversarios.items():
-            # Tenta pegar o membro do cache (que agora deve ser mais completo)
             member = message.guild.get_member(int(user_id))
             if member: # Se o membro for encontrado no servidor
                 aniversariantes_do_servidor.append(info)
@@ -181,7 +188,7 @@ async def on_message(message):
 
     # p!removeraniversario (remove o próprio)
     if message.content.startswith("p!removeraniversario"):
-        with open(ARQUIVO_ANIVERSARIOS, "r") as f:
+        with open(ARQUivo_ANIVERSARIOS, "r") as f:
             aniversarios = json.load(f)
 
         user_id = str(message.author.id)
@@ -248,7 +255,6 @@ async def on_message(message):
             await message.channel.send(embed=criar_embed("Erro", "❌ Use assim: `p!addaniversario @usuario DD/MM`", discord.Color.red()))
             return
 
-        # CORREÇÃO: Variável 'membro' corretamente escrita
         membro = message.mentions[0] if message.mentions else None
         data = partes[2]
 
