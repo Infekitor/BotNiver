@@ -15,12 +15,16 @@ def home():
     return "PowerNiver bot está rodando! 🎉"
 
 def keep_alive():
-    Thread(target=app.run, kwargs={'host': '00.0.0.0', 'port': 8080}).start() # Corrigi o host para 0.0.0.0
+    # CORREÇÃO: Host alterado de '00.0.0.0' para '0.0.0.0'
+    Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': 8080}).start()
 
 # --- DISCORD BOT ---
 
 intents = discord.Intents.default()
 intents.message_content = True
+# Se você tiver problemas com o bot não vendo membros (ex: para comandos de aniversário),
+# pode ser necessário adicionar intents.members = True e ativar isso no Portal do Desenvolvedor Discord
+# intents.members = True 
 client = discord.Client(intents=intents)
 
 # Arquivos para armazenar dados
@@ -41,7 +45,9 @@ async def checar_aniversarios():
     print("Iniciando checagem de aniversários...")
 
     while not client.is_closed():
-        hoje = datetime.datetime.now(timezone(timedelta(hours=-3)))
+        # Define o fuso horário para Brasília (UTC-3)
+        fuso_horario_brasilia = timezone(timedelta(hours=-3))
+        hoje = datetime.datetime.now(fuso_horario_brasilia)
         data_hoje = hoje.strftime("%d/%m")
         print(f"🔎 Checando aniversários para: {data_hoje}")
 
@@ -74,7 +80,6 @@ async def checar_aniversarios():
                     print(f"📭 Nenhum aniversariante hoje no servidor {guild.name}.")
             else:
                 print(f"⚠️ Servidor {guild.name} (ID: {guild_id}) não tem um canal de aniversário configurado.")
-
 
         await asyncio.sleep(3600)  # espera 1 hora antes de checar novamente
 
@@ -138,7 +143,7 @@ async def on_message(message):
 
         await message.channel.send(embed=criar_embed("Aniversário Registrado", f"🎉 Aniversário de {message.author.mention} registrado como {data}!", discord.Color.green()))
 
-    # p!aniversariantes (lista todos)
+    # p!aniversariantes (lista todos os membros do servidor atual)
     if message.content.startswith("p!aniversariantes"):
         with open(ARQUIVO_ANIVERSARIOS, "r") as f:
             aniversarios = json.load(f)
@@ -148,15 +153,23 @@ async def on_message(message):
             return
 
         embed = discord.Embed(title="📅 Lista de Aniversariantes", color=discord.Color.purple())
+        # Cria uma lista temporária para os aniversariantes do servidor atual
+        aniversariantes_do_servidor = []
         for user_id, info in aniversarios.items():
             # Apenas mostra aniversários de membros que estão no servidor atual
             if message.guild and message.guild.get_member(int(user_id)):
-                embed.add_field(name=info["nome"], value=f"🎂 {info['data']}", inline=False)
+                aniversariantes_do_servidor.append(info)
+        
+        # Ordena a lista de aniversariantes por mês e depois por dia
+        aniversariantes_do_servidor.sort(key=lambda x: (int(x['data'].split('/')[1]), int(x['data'].split('/')[0])))
 
-        if not embed.fields: # Se não houver campos, significa que ninguém do servidor atual tem aniversário registrado
+        if not aniversariantes_do_servidor: # Se não houver campos, significa que ninguém do servidor atual tem aniversário registrado
             await message.channel.send(embed=criar_embed("Lista de Aniversariantes", "📭 Nenhum aniversário registrado para este servidor ainda.", discord.Color.orange()))
         else:
+            for info in aniversariantes_do_servidor:
+                embed.add_field(name=info["nome"], value=f"🎂 {info['data']}", inline=False)
             await message.channel.send(embed=embed)
+
 
     # p!removeraniversario (remove o próprio)
     if message.content.startswith("p!removeraniversario"):
@@ -175,7 +188,8 @@ async def on_message(message):
 
     # p!proximoaniversario (próximo aniversário)
     if message.content.startswith("p!proximoaniversario"):
-        hoje = datetime.datetime.now(timezone(timedelta(hours=-3)))
+        fuso_horario_brasilia = timezone(timedelta(hours=-3))
+        hoje = datetime.datetime.now(fuso_horario_brasilia)
 
         with open(ARQUIVO_ANIVERSARIOS, "r") as f:
             aniversarios = json.load(f)
@@ -184,17 +198,22 @@ async def on_message(message):
             await message.channel.send(embed=criar_embed("Próximo Aniversário", "📭 Nenhum aniversário registrado.", discord.Color.orange()))
             return
 
-        def dias_faltando(data):
-            d, m = map(int, data.split("/"))
+        def dias_faltando(data_str):
+            d, m = map(int, data_str.split("/"))
             ano = hoje.year
-            data_aniver = datetime.datetime(ano, m, d, tzinfo=timezone(timedelta(hours=-3)))
-            if data_aniver < hoje:
-                data_aniver = datetime.datetime(ano + 1, m, d, tzinfo=timezone(timedelta(hours=-3)))
-            return (data_aniver - hoje).days
+            
+            # Tenta com o ano atual
+            data_aniver_este_ano = datetime.datetime(ano, m, d, tzinfo=fuso_horario_brasilia)
+            
+            # Se o aniversário já passou este ano, calcula para o próximo ano
+            if data_aniver_este_ano < hoje:
+                data_aniver_este_ano = datetime.datetime(ano + 1, m, d, tzinfo=fuso_horario_brasilia)
+            
+            return (data_aniver_este_ano - hoje).days
 
         # Filtra aniversários para considerar apenas membros do servidor atual
         aniversarios_do_servidor = {
-            uid: info for uid, info in aniversarios.items() 
+            uid: info for uid, info in aniversarios.items()  
             if message.guild and message.guild.get_member(int(uid))
         }
 
@@ -202,7 +221,9 @@ async def on_message(message):
             await message.channel.send(embed=criar_embed("Próximo Aniversário", "📭 Nenhum aniversário registrado para este servidor.", discord.Color.orange()))
             return
 
+        # Ordena para encontrar o mais próximo, garantindo que "hoje" ou "passado" seja ajustado
         proximos = sorted(aniversarios_do_servidor.items(), key=lambda x: dias_faltando(x[1]["data"]))
+        
         proximo_id, info = proximos[0]
         dias = dias_faltando(info["data"])
 
@@ -219,7 +240,7 @@ async def on_message(message):
             await message.channel.send(embed=criar_embed("Erro", "❌ Use assim: `p!addaniversario @usuario DD/MM`", discord.Color.red()))
             return
 
-        membro = message.mentions[0] if message.mentions else None
+        membr o = message.mentions[0] if message.mentions else None
         data = partes[2]
 
         if membro is None:
@@ -265,7 +286,8 @@ async def on_message(message):
         if not canal_selecionado:
             try:
                 canal_id_str = partes[1]
-                canal_id = int(canal_id_str.replace('<#', '').replace('>', '')) # Limpa se for menção
+                # Remove caracteres de menção de canal se presentes
+                canal_id = int(canal_id_str.replace('<#', '').replace('>', ''))
                 canal_selecionado = client.get_channel(canal_id)
             except ValueError:
                 await message.channel.send(embed=criar_embed("Erro", "❌ Formato de ID de canal inválido. Use um ID numérico ou mencione o canal.", discord.Color.red()))
