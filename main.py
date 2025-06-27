@@ -24,7 +24,7 @@ def keep_alive():
 # Configurações do MongoDB
 # O URI de conexão será obtido das variáveis de ambiente do Render
 MONGO_URI = os.getenv("MONGO_URI")
-print(f"DEBUG: MONGO_URI lido: {MONGO_URI}") # <--- LINHA DE DEPURÇÃO ADICIONADA AQUI
+print(f"DEBUG: MONGO_URI lido: {MONGO_URI}")
 
 db_client = None # Variável global para o cliente do MongoDB
 db_collection_aniversarios = None
@@ -33,7 +33,7 @@ db_collection_config = None
 def connect_to_mongodb():
     global db_client, db_collection_aniversarios, db_collection_config
     try:
-        if MONGO_URI is None or MONGO_URI == "": # Adicionado verificação para string vazia
+        if MONGO_URI is None or MONGO_URI == "":
             print("❌ Erro: Variável de ambiente MONGO_URI não configurada ou vazia!")
             return False
 
@@ -58,7 +58,7 @@ connect_to_mongodb()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True  # EXPLICITAMENTE ATIVAR A INTENT DE MEMBROS
-intents.presences = True # Também é bom garantir que presences esteja ativa para ver status, se necessário para outras coisas.
+intents.presences = True
 
 client = discord.Client(intents=intents, member_cache_flags=discord.MemberCacheFlags.all())
 
@@ -97,6 +97,26 @@ async def checar_aniversarios():
             continue # Pula para a próxima iteração do loop
 
         for guild in client.guilds:
+            guild_id = str(guild.id)
+            guild_config = configuracoes.get(guild_id, {})
+            canal_id = guild_config.get("channel_id")
+            last_announcement_date = guild_config.get("last_announcement_date")
+
+            if canal_id is None:
+                print(f"⚠️ Servidor {guild.name} (ID: {guild_id}) não tem um canal de aniversário configurado.")
+                continue
+
+            # Verifica se os parabéns já foram enviados hoje para este servidor
+            if last_announcement_date == data_hoje:
+                print(f"✅ Aniversários já verificados e anunciados para hoje no servidor {guild.name}.")
+                continue # Pula para o próximo servidor
+
+            canal = client.get_channel(int(canal_id))
+
+            if canal is None:
+                print(f"❌ Canal não encontrado para o servidor {guild.name} (ID: {guild_id}). Verifique o ID configurado.")
+                continue
+
             try:
                 await guild.chunk()
                 print(f"🔄 Cache de membros carregado para o servidor: {guild.name} ({len(guild.members)} membros no cache)")
@@ -104,37 +124,38 @@ async def checar_aniversarios():
                 print(f"⚠️ Sem permissão para carregar membros no servidor {guild.name}. Verifique as intents do bot.")
                 continue
 
-            guild_id = str(guild.id)
-            if guild_id in configuracoes and "channel_id" in configuracoes[guild_id]:
-                canal_id = configuracoes[guild_id]["channel_id"]
-                canal = client.get_channel(int(canal_id))
+            achou_no_servidor = False
+            for user_id, info in aniversarios.items():
+                member = guild.get_member(int(user_id))
+                if member and info["data"] == data_hoje:
+                    achou_no_servidor = True
 
-                if canal is None:
-                    print(f"❌ Canal não encontrado para o servidor {guild.name} (ID: {guild_id}). Verifique o ID configurado.")
-                    continue
+                    embed_aniversario = discord.Embed(
+                        title=f"🎉 Feliz Aniversário, {info['nome']}! 🎂",
+                        description=f"Hoje é o dia de celebrar o nosso querido(a) **{info['nome']}**! Desejamos um dia cheio de alegria, paz e muitos presentes! ✨",
+                        color=discord.Color.gold()
+                    )
+                    embed_aniversario.set_thumbnail(url=member.display_avatar.url)
+                    embed_aniversario.set_footer(text="Que este novo ciclo seja incrível!")
 
-                achou_no_servidor = False
-                for user_id, info in aniversarios.items():
-                    member = guild.get_member(int(user_id))
-                    if member and info["data"] == data_hoje:
-                        achou_no_servidor = True
+                    await canal.send(content=f"Parabéns, {member.mention}!", embed=embed_aniversario)
 
-                        embed_aniversario = discord.Embed(
-                            title=f"🎉 Feliz Aniversário, {info['nome']}! 🎂",
-                            description=f"Hoje é o dia de celebrar o nosso querido(a) **{info['nome']}**! Desejamos um dia cheio de alegria, paz e muitos presentes! ✨",
-                            color=discord.Color.gold()
-                        )
-                        embed_aniversario.set_thumbnail(url=member.display_avatar.url)
-                        embed_aniversario.set_footer(text="Que este novo ciclo seja incrível!")
+                    print(f"🎉 Parabéns enviados para {info['nome']} no servidor {guild.name}")
 
-                        await canal.send(content=f"Parabéns, {member.mention}!", embed=embed_aniversario)
+            # Após processar todos os usuários para o servidor atual, atualiza a data da última verificação.
+            # Isso garante que, mesmo que não haja aniversariantes, a verificação do dia seja marcada como feita.
+            try:
+                db_collection_config.update_one(
+                    {"_id": guild_id},
+                    {"$set": {"last_announcement_date": data_hoje}},
+                    upsert=True
+                )
+                print(f"📅 Data de última verificação de aniversário atualizada para {data_hoje} no servidor {guild.name}.")
+            except Exception as e:
+                print(f"❌ Erro ao atualizar last_announcement_date para {guild.name}: {e}")
 
-                        print(f"🎉 Parabéns enviados para {info['nome']} no servidor {guild.name}")
-
-                if not achou_no_servidor:
-                    print(f"📭 Nenhum aniversariante hoje no servidor {guild.name}.")
-            else:
-                print(f"⚠️ Servidor {guild.name} (ID: {guild_id}) não tem um canal de aniversário configurado.")
+            if not achou_no_servidor:
+                print(f"📭 Nenhum aniversariante hoje no servidor {guild.name}.")
 
         await asyncio.sleep(3600)  # espera 1 hora antes de checar novamente
 
