@@ -1,6 +1,5 @@
 import discord
 import os
-import json
 import asyncio
 import datetime
 from datetime import timezone, timedelta
@@ -22,7 +21,7 @@ def keep_alive():
 
 # --- DISCORD BOT ---
 
-# Configurações do MongoDB (Render → Environment)
+# Configurações MongoDB
 MONGO_URI = os.getenv("MONGO_URI")
 print(f"DEBUG: MONGO_URI lido: {MONGO_URI}")
 
@@ -34,7 +33,7 @@ def connect_to_mongodb():
     global db_client, db_collection_aniversarios, db_collection_config
     try:
         if not MONGO_URI:
-            print("❌ Variável de ambiente MONGO_URI não configurada!")
+            print("❌ Variável MONGO_URI não configurada!")
             return False
         db_client = MongoClient(MONGO_URI)
         db_client.admin.command('ping')
@@ -143,7 +142,6 @@ async def checar_aniversarios():
                     )
                     print(f"🎉 Parabéns enviados para {info['nome']} em {guild.name}")
 
-            # marca como verificado (mesmo sem aniversariante)
             try:
                 db_collection_config.update_one(
                     {"_id": gid},
@@ -198,9 +196,6 @@ async def on_message(message: discord.Message):
                         inline=False)
         embed.add_field(name="`p!setcanal #canal`",
                         value="**ADM** – define o canal de avisos.",
-                        inline=False)
-        embed.add_field(name="`p!testealerta [@alvo]`",
-                        value="**ADM** – mostra como fica o embed diário.",
                         inline=False)
         embed.set_footer(text="Aproveite o bot! 🎉")
         await message.channel.send(embed=embed)
@@ -441,27 +436,6 @@ async def on_message(message: discord.Message):
         except Exception as e:
             await message.channel.send(embed=criar_embed(
                 "Erro", f"DB error: {e}", discord.Color.red()))
-
-    # ----- p!testealerta (ADM) -----
-    if message.content.startswith("p!testealerta"):
-        if not message.author.guild_permissions.administrator:
-            await message.channel.send(embed=criar_embed(
-                "Permissão", "❌ Apenas administradores.",
-                discord.Color.red()))
-            return
-        alvo = message.mentions[0] if message.mentions else message.author
-        embed_teste = discord.Embed(
-            title=f"🎉 Feliz Aniversário, {alvo.display_name}! 🎂",
-            description=f"Hoje é o dia de celebrar **{alvo.display_name}**! "
-                        "Desejamos um dia cheio de alegria, paz e muitos presentes! ✨",
-            color=discord.Color.gold())
-        embed_teste.set_thumbnail(url=alvo.display_avatar.url)
-        embed_teste.set_footer(text="Que este novo ciclo seja incrível!")
-        await message.channel.send(
-            content=f"@everyone Parabéns, {alvo.mention}! (🎈 *mensagem de teste*)",
-            embed=embed_teste,
-            allowed_mentions=discord.AllowedMentions(everyone=True, users=True)
-        )
 
 
 # ---------- EXECUÇÃO ----------
