@@ -66,7 +66,7 @@ def criar_embed(titulo, descricao, cor=discord.Color.purple()):
 
 
 def chunk(lst, n):
-    """Divide lista em sub‑listas de tamanho n"""
+    """Divide lista em sub-listas de tamanho n"""
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
@@ -154,7 +154,7 @@ async def checar_aniversarios():
             if not houve_parabens:
                 print(f"📭 Sem aniversariantes hoje em {guild.name}.")
 
-        await asyncio.sleep(3600)  # 1 h
+        await asyncio.sleep(3600)  # 1 h
 
 
 # ---------- EVENTOS ----------
@@ -191,6 +191,8 @@ async def on_message(message: discord.Message):
                         value="Remove seu aniversário.", inline=False)
         embed.add_field(name="`p!proximoaniversario`",
                         value="Mostra o próximo aniversário.", inline=False)
+        embed.add_field(name="`p!buscaraniversario @user`",
+                        value="Mostra a data de aniversário de alguém.", inline=False)
         embed.add_field(name="`p!addaniversario @user DD/MM`",
                         value="**ADM** – adiciona aniversário de outro usuário.",
                         inline=False)
@@ -361,6 +363,30 @@ async def on_message(message: discord.Message):
             "Próximo Aniversário",
             f"⏳ **{info['nome']}** em **{dias}** dia(s) — {info['data']} 🎉",
             discord.Color.green()))
+
+    # ----- p!buscaraniversario -----
+    if message.content.startswith("p!buscaraniversario"):
+        if not message.mentions:
+            await message.channel.send(embed=criar_embed(
+                "Erro", "Use: `p!buscaraniversario @user`",
+                discord.Color.red()))
+            return
+        membro = message.mentions[0]
+        try:
+            registro = db_collection_aniversarios.find_one({"_id": str(membro.id)})
+            if not registro:
+                await message.channel.send(embed=criar_embed(
+                    "Não encontrado",
+                    f"⚠️ {membro.display_name} não tem aniversário registrado.",
+                    discord.Color.orange()))
+                return
+            await message.channel.send(embed=criar_embed(
+                "Aniversário Encontrado",
+                f"🎂 {membro.mention} faz aniversário em **{registro['data']}**!",
+                discord.Color.green()))
+        except Exception as e:
+            await message.channel.send(embed=criar_embed(
+                "Erro", f"DB error: {e}", discord.Color.red()))
 
     # ----- p!addaniversario (ADM) -----
     if message.content.startswith("p!addaniversario"):
