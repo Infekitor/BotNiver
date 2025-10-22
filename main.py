@@ -1,469 +1,233 @@
 import discord
-import os
-import asyncio
-import datetime
-from datetime import timezone, timedelta
-from flask import Flask
-from threading import Thread
+from discord.ext import commands, tasks
+from datetime import datetime, timedelta
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure
+import pytz
+import os
 
-# --- KEEP ALIVE ---
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "PowerNiver bot está rodando! 🎉"
-
-def keep_alive():
-    Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': 8080}).start()
-
-
-# --- DISCORD BOT ---
-
-# Configurações MongoDB
-MONGO_URI = os.getenv("MONGO_URI")
-print(f"DEBUG: MONGO_URI lido: {MONGO_URI}")
-
-db_client = None
-db_collection_aniversarios = None
-db_collection_config = None
-
-def connect_to_mongodb():
-    global db_client, db_collection_aniversarios, db_collection_config
-    try:
-        if not MONGO_URI:
-            print("❌ Variável MONGO_URI não configurada!")
-            return False
-        db_client = MongoClient(MONGO_URI)
-        db_client.admin.command('ping')
-        print("✅ Conectado ao MongoDB Atlas!")
-        db = db_client["powerniver_db"]
-        db_collection_aniversarios = db["aniversarios"]
-        db_collection_config = db["config"]
-        return True
-    except ConnectionFailure as e:
-        print(f"❌ Falha ao conectar ao MongoDB: {e}")
-        return False
-    except Exception as e:
-        print(f"❌ Erro inesperado: {e}")
-        return False
-
-connect_to_mongodb()
-
+# === CONFIGURAÇÕES ===
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-intents.presences = True
 
-client = discord.Client(intents=intents,
-                        member_cache_flags=discord.MemberCacheFlags.all())
+bot = commands.Bot(command_prefix='!', intents=intents)
 
+# === CONEXÃO COM MONGODB ===
+MONGO_URI = os.getenv("MONGO_URI")  # ou coloque direto sua string aqui temporariamente
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["powerniver"]
+collection = db["aniversarios"]
 
-# ---------- UTILIDADES ----------
-def criar_embed(titulo, descricao, cor=discord.Color.purple()):
-    return discord.Embed(title=titulo, description=descricao, color=cor)
+# === CANAL DE PARABÉNS ===
+CANAL_PARABENS_ID = 1339658651555594342
 
-
-def chunk(lst, n):
-    """Divide lista em sub-listas de tamanho n"""
-    for i in range(0, len(lst), n):
-        yield lst[i:i + n]
-
-
-# ---------- TAREFA DIÁRIA ----------
-async def checar_aniversarios():
-    await client.wait_until_ready()
-    print("Iniciando checagem de aniversários...")
-
-    while not client.is_closed():
-        if db_client is None:
-            print("Tentando reconectar ao MongoDB...")
-            if not connect_to_mongodb():
-                await asyncio.sleep(60)
-                continue
-
-        fuso_br = timezone(timedelta(hours=-3))
-        hoje = datetime.datetime.now(fuso_br)
-        data_hoje = hoje.strftime("%d/%m")
-        print(f"🔎 Checando aniversários para: {data_hoje}")
-
-        try:
-            aniversarios = {d['_id']: d for d in db_collection_aniversarios.find({})}
-            configuracoes = {d['_id']: d for d in db_collection_config.find({})}
-        except Exception as e:
-            print(f"❌ Erro lendo MongoDB: {e}")
-            if not connect_to_mongodb():
-                await asyncio.sleep(60)
-            continue
-
-        for guild in client.guilds:
-            gid = str(guild.id)
-            conf = configuracoes.get(gid, {})
-            canal_id = conf.get("channel_id")
-            last_date = conf.get("last_announcement_date")
-
-            if not canal_id:
-                print(f"⚠️ Servidor {guild.name} não configurou canal.")
-                continue
-            if last_date == data_hoje:
-                continue
-
-            canal = client.get_channel(int(canal_id))
-            if not canal:
-                print(f"❌ Canal {canal_id} não encontrado em {guild.name}.")
-                continue
-
-            try:
-                await guild.chunk()
-            except discord.Forbidden:
-                print(f"⚠️ Sem permissão para chunk em {guild.name}.")
-                continue
-
-            houve_parabens = False
-            for uid, info in aniversarios.items():
-                member = guild.get_member(int(uid))
-                if member and info["data"] == data_hoje:
-                    houve_parabens = True
-                    embed = discord.Embed(
-                        title=f"🎉 Feliz Aniversário, {info['nome']}! 🎂",
-                        description=f"Hoje é dia de celebrar **{info['nome']}**! "
-                                    "Desejamos alegria, paz e muitos presentes! ✨",
-                        color=discord.Color.gold()
-                    )
-                    embed.set_thumbnail(url=member.display_avatar.url)
-                    embed.set_footer(text="Que este novo ciclo seja incrível!")
-
-                    await canal.send(
-                        content=f"@everyone Parabéns, {member.mention}!",
-                        embed=embed,
-                        allowed_mentions=discord.AllowedMentions(
-                            everyone=True, users=True)
-                    )
-                    print(f"🎉 Parabéns enviados para {info['nome']} em {guild.name}")
-
-            try:
-                db_collection_config.update_one(
-                    {"_id": gid},
-                    {"$set": {"last_announcement_date": data_hoje}},
-                    upsert=True
-                )
-            except Exception as e:
-                print(f"❌ Erro ao atualizar last_date: {e}")
-
-            if not houve_parabens:
-                print(f"📭 Sem aniversariantes hoje em {guild.name}.")
-
-        await asyncio.sleep(3600)  # 1 h
+# === FUSO HORÁRIO ===
+fuso_brasilia = pytz.timezone('America/Sao_Paulo')
 
 
-# ---------- EVENTOS ----------
-@client.event
+# === EVENTOS ===
+@bot.event
 async def on_ready():
-    print(f'✅ Bot conectado como {client.user}')
-    client.loop.create_task(checar_aniversarios())
+    print(f"✅ Bot {bot.user} conectado com sucesso!")
+    verificar_aniversarios.start()
 
 
-@client.event
-async def on_message(message: discord.Message):
-    if message.author == client.user:
+# === FUNÇÕES ===
+def formatar_data(data_str):
+    try:
+        data = datetime.strptime(data_str, "%d/%m")
+        return data.strftime("%d/%m")
+    except ValueError:
+        return None
+
+
+# === COMANDO: REGISTRAR ANIVERSÁRIO ===
+@bot.command()
+async def aniversario(ctx, *, data: str = None):
+    if not data:
+        await ctx.send(embed=discord.Embed(
+            title="❌ Erro",
+            description="Use: `!aniversario DD/MM`",
+            color=discord.Color.red()))
         return
 
-    if db_client is None:
-        await message.channel.send(embed=criar_embed(
-            "Erro de Conexão",
-            "❌ Não foi possível conectar ao banco de dados.",
-            discord.Color.red()))
+    data_formatada = formatar_data(data)
+    if not data_formatada:
+        await ctx.send(embed=discord.Embed(
+            title="❌ Data inválida!",
+            description="Use o formato `DD/MM` (ex: 25/12).",
+            color=discord.Color.red()))
         return
 
-    # ----- p!help -----
-    if message.content == "p!help":
-        embed = criar_embed("Comandos do PowerNiver Bot",
-                            "Aqui estão todos os comandos:",
-                            discord.Color.blue())
-        embed.add_field(name="`p!help`", value="Mostra esta ajuda.", inline=False)
-        embed.add_field(name="`p!ping`", value="Teste de latência.", inline=False)
-        embed.add_field(name="`p!aniversario DD/MM`",
-                        value="Registra seu aniversário.", inline=False)
-        embed.add_field(name="`p!aniversariantes`",
-                        value="Lista aniversários deste servidor (paginado).", inline=False)
-        embed.add_field(name="`p!removeraniversario`",
-                        value="Remove seu aniversário.", inline=False)
-        embed.add_field(name="`p!proximoaniversario`",
-                        value="Mostra o próximo aniversário.", inline=False)
-        embed.add_field(name="`p!buscaraniversario @user`",
-                        value="Mostra a data de aniversário de alguém.", inline=False)
-        embed.add_field(name="`p!addaniversario @user DD/MM`",
-                        value="**ADM** – adiciona aniversário de outro usuário.",
-                        inline=False)
-        embed.add_field(name="`p!setcanal #canal`",
-                        value="**ADM** – define o canal de avisos.",
-                        inline=False)
-        embed.set_footer(text="Aproveite o bot! 🎉")
-        await message.channel.send(embed=embed)
+    existente = collection.find_one({"id": ctx.author.id})
+    if existente:
+        collection.update_one({"id": ctx.author.id}, {"$set": {"data": data_formatada}})
+        msg = "🎂 Data de aniversário atualizada!"
+    else:
+        collection.insert_one({
+            "id": ctx.author.id,
+            "nome": ctx.author.display_name,
+            "data": data_formatada
+        })
+        msg = "🎉 Aniversário registrado com sucesso!"
 
-    # ----- p!ping -----
-    if message.content == "p!ping":
-        await message.channel.send(embed=criar_embed(
-            "Pong", "pong ✅", discord.Color.green()))
-
-    # ----- p!aniversario (registro) -----
-    if message.content.startswith("p!aniversario"):
-        partes = message.content.split()
-        if len(partes) != 2:
-            await message.channel.send(embed=criar_embed(
-                "Erro", "Use: `p!aniversario DD/MM`", discord.Color.red()))
-            return
-        data = partes[1]
-        try:
-            dia, mes = map(int, data.split("/"))
-            if dia not in range(1, 32) or mes not in range(1, 13):
-                raise ValueError
-        except ValueError:
-            await message.channel.send(embed=criar_embed(
-                "Erro", "Data inválida. Use DD/MM.", discord.Color.red()))
-            return
-        try:
-            db_collection_aniversarios.update_one(
-                {"_id": str(message.author.id)},
-                {"$set": {"nome": message.author.display_name, "data": data}},
-                upsert=True)
-            await message.channel.send(embed=criar_embed(
-                "Aniversário Registrado",
-                f"🎉 {message.author.mention} em {data}!",
-                discord.Color.green()))
-        except Exception as e:
-            await message.channel.send(embed=criar_embed(
-                "Erro", f"DB error: {e}", discord.Color.red()))
-
-    # ----- p!aniversariantes (paginado) -----
-    if message.content.startswith("p!aniversariantes"):
-        if message.guild:
-            try:
-                await message.guild.chunk()
-            except discord.Forbidden:
-                await message.channel.send(embed=criar_embed(
-                    "Permissão", "Sem permissão para listar membros.",
-                    discord.Color.red()))
-                return
-        try:
-            aniversarios = {d['_id']: d for d in db_collection_aniversarios.find({})}
-        except Exception as e:
-            await message.channel.send(embed=criar_embed(
-                "Erro", f"DB error: {e}", discord.Color.red()))
-            return
-
-        lista = [info for uid, info in aniversarios.items()
-                 if message.guild.get_member(int(uid))]
-        if not lista:
-            await message.channel.send(embed=criar_embed(
-                "Lista", "📭 Nenhum aniversário neste servidor.",
-                discord.Color.orange()))
-            return
-
-        lista.sort(key=lambda x: (int(x['data'][3:]), int(x['data'][:2])))
-        paginas = list(chunk(lista, 10))
-
-        class Paginador(discord.ui.View):
-            def __init__(self):
-                super().__init__(timeout=120)
-                self.ind = 0
-                self._update_buttons()
-
-            def _embed(self):
-                e = discord.Embed(title="📅 Lista de Aniversariantes",
-                                  color=discord.Color.purple())
-                for i in paginas[self.ind]:
-                    e.add_field(name=i['nome'],
-                                value=f"🎂 {i['data']}", inline=False)
-                e.set_footer(text=f"Página {self.ind+1}/{len(paginas)}")
-                return e
-
-            def _update_buttons(self):
-                self.first.disabled = self.prev.disabled = (self.ind == 0)
-                self.next.disabled = self.last.disabled = (
-                    self.ind == len(paginas) - 1)
-
-            @discord.ui.button(label='⏮', style=discord.ButtonStyle.grey)
-            async def first(self, interaction: discord.Interaction, _):
-                self.ind = 0; self._update_buttons()
-                await interaction.response.edit_message(embed=self._embed(), view=self)
-
-            @discord.ui.button(label='◀', style=discord.ButtonStyle.grey)
-            async def prev(self, interaction: discord.Interaction, _):
-                self.ind -= 1; self._update_buttons()
-                await interaction.response.edit_message(embed=self._embed(), view=self)
-
-            @discord.ui.button(label='▶', style=discord.ButtonStyle.grey)
-            async def next(self, interaction: discord.Interaction, _):
-                self.ind += 1; self._update_buttons()
-                await interaction.response.edit_message(embed=self._embed(), view=self)
-
-            @discord.ui.button(label='⏭', style=discord.ButtonStyle.grey)
-            async def last(self, interaction: discord.Interaction, _):
-                self.ind = len(paginas) - 1; self._update_buttons()
-                await interaction.response.edit_message(embed=self._embed(), view=self)
-
-        view = Paginador()
-        await message.channel.send(embed=view._embed(), view=view)
-
-    # ----- p!removeraniversario -----
-    if message.content.startswith("p!removeraniversario"):
-        try:
-            result = db_collection_aniversarios.delete_one(
-                {"_id": str(message.author.id)})
-            if result.deleted_count:
-                await message.channel.send(embed=criar_embed(
-                    "Removido", "🗑️ Aniversário removido.",
-                    discord.Color.green()))
-            else:
-                await message.channel.send(embed=criar_embed(
-                    "Aviso", "⚠️ Você não tinha aniversário registrado.",
-                    discord.Color.orange()))
-        except Exception as e:
-            await message.channel.send(embed=criar_embed(
-                "Erro", f"DB error: {e}", discord.Color.red()))
-
-    # ----- p!proximoaniversario -----
-    if message.content.startswith("p!proximoaniversario"):
-        fuso_br = timezone(timedelta(hours=-3))
-        hoje = datetime.datetime.now(fuso_br)
-        try:
-            aniversarios = {d['_id']: d for d in db_collection_aniversarios.find({})}
-        except Exception as e:
-            await message.channel.send(embed=criar_embed(
-                "Erro", f"DB error: {e}", discord.Color.red()))
-            return
-        if not aniversarios:
-            await message.channel.send(embed=criar_embed(
-                "Próximo", "📭 Nenhum aniversário registrado.",
-                discord.Color.orange()))
-            return
-
-        def faltam(data_str):
-            d, m = map(int, data_str.split("/"))
-            ano = hoje.year
-            alvo = datetime.datetime(ano, m, d, tzinfo=fuso_br)
-            if alvo < hoje:
-                alvo = alvo.replace(year=ano + 1)
-            return (alvo - hoje).days
-
-        alvos = {uid: info for uid, info in aniversarios.items()
-                 if message.guild.get_member(int(uid))}
-        if not alvos:
-            await message.channel.send(embed=criar_embed(
-                "Próximo", "📭 Nenhum aniversário neste servidor.",
-                discord.Color.orange()))
-            return
-
-        prox_uid, info = min(alvos.items(), key=lambda x: faltam(x[1]['data']))
-        dias = faltam(info['data'])
-
-        await message.channel.send(embed=criar_embed(
-            "Próximo Aniversário",
-            f"⏳ **{info['nome']}** em **{dias}** dia(s) — {info['data']} 🎉",
-            discord.Color.green()))
-
-    # ----- p!buscaraniversario -----
-    if message.content.startswith("p!buscaraniversario"):
-        if not message.mentions:
-            await message.channel.send(embed=criar_embed(
-                "Erro", "Use: `p!buscaraniversario @user`",
-                discord.Color.red()))
-            return
-        membro = message.mentions[0]
-        try:
-            registro = db_collection_aniversarios.find_one({"_id": str(membro.id)})
-            if not registro:
-                await message.channel.send(embed=criar_embed(
-                    "Não encontrado",
-                    f"⚠️ {membro.display_name} não tem aniversário registrado.",
-                    discord.Color.orange()))
-                return
-            await message.channel.send(embed=criar_embed(
-                "Aniversário Encontrado",
-                f"🎂 {membro.mention} faz aniversário em **{registro['data']}**!",
-                discord.Color.green()))
-        except Exception as e:
-            await message.channel.send(embed=criar_embed(
-                "Erro", f"DB error: {e}", discord.Color.red()))
-
-    # ----- p!addaniversario (ADM) -----
-    if message.content.startswith("p!addaniversario"):
-        if not message.author.guild_permissions.administrator:
-            await message.channel.send(embed=criar_embed(
-                "Permissão", "❌ Apenas administradores.",
-                discord.Color.red()))
-            return
-        partes = message.content.split()
-        if len(partes) != 3 or not message.mentions:
-            await message.channel.send(embed=criar_embed(
-                "Erro", "Use: `p!addaniversario @user DD/MM`",
-                discord.Color.red()))
-            return
-        membro = message.mentions[0]
-        data = partes[2]
-        try:
-            dia, mes = map(int, data.split("/"))
-            if dia not in range(1, 32) or mes not in range(1, 13):
-                raise ValueError
-        except ValueError:
-            await message.channel.send(embed=criar_embed(
-                "Erro", "Data inválida.", discord.Color.red()))
-            return
-        try:
-            db_collection_aniversarios.update_one(
-                {"_id": str(membro.id)},
-                {"$set": {"nome": membro.display_name, "data": data}},
-                upsert=True)
-            await message.channel.send(embed=criar_embed(
-                "Adicionado",
-                f"🎉 {membro.mention} em {data}!",
-                discord.Color.green()))
-        except Exception as e:
-            await message.channel.send(embed=criar_embed(
-                "Erro", f"DB error: {e}", discord.Color.red()))
-
-    # ----- p!setcanal (ADM) -----
-    if message.content.startswith("p!setcanal"):
-        if not message.author.guild_permissions.administrator:
-            await message.channel.send(embed=criar_embed(
-                "Permissão", "❌ Apenas administradores.",
-                discord.Color.red()))
-            return
-        partes = message.content.split()
-        if len(partes) < 2:
-            await message.channel.send(embed=criar_embed(
-                "Erro", "Use: `p!setcanal #canal` ou ID.",
-                discord.Color.red()))
-            return
-        canal_sel = message.channel_mentions[0] if message.channel_mentions else None
-        if not canal_sel:
-            try:
-                cid = int(partes[1].replace('<#', '').replace('>', ''))
-                canal_sel = client.get_channel(cid)
-            except ValueError:
-                await message.channel.send(embed=criar_embed(
-                    "Erro", "ID inválido.", discord.Color.red()))
-                return
-        if not canal_sel:
-            await message.channel.send(embed=criar_embed(
-                "Erro", "Canal não encontrado.", discord.Color.red()))
-            return
-        try:
-            db_collection_config.update_one(
-                {"_id": str(message.guild.id)},
-                {"$set": {"channel_id": str(canal_sel.id)}},
-                upsert=True)
-            await message.channel.send(embed=criar_embed(
-                "Configuração",
-                f"✅ Canal de avisos: {canal_sel.mention}",
-                discord.Color.green()))
-        except Exception as e:
-            await message.channel.send(embed=criar_embed(
-                "Erro", f"DB error: {e}", discord.Color.red()))
+    await ctx.send(embed=discord.Embed(
+        title=msg,
+        color=discord.Color.green()
+    ))
 
 
-# ---------- EXECUÇÃO ----------
-keep_alive()
-client.run(os.getenv("DISCORD_TOKEN"))
+# === COMANDO: LISTAR ANIVERSARIANTES (com avatar e paginação) ===
+@bot.command()
+async def aniversariantes(ctx):
+    aniversarios = list(collection.find({}).sort("data", 1))
+
+    if not aniversarios:
+        await ctx.send(embed=discord.Embed(
+            title="🎂 Nenhum aniversário registrado!",
+            color=discord.Color.red()
+        ))
+        return
+
+    paginas = [aniversarios[i:i + 5] for i in range(0, len(aniversarios), 5)]
+
+    class Paginador(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+            self.ind = 0
+
+        async def _gerar_embeds(self):
+            embeds = []
+            for i in paginas[self.ind]:
+                user = ctx.guild.get_member(i["id"])
+                nome = i["nome"]
+                data = i["data"]
+
+                e = discord.Embed(
+                    title=f"🎂 {nome}",
+                    description=f"📅 **{data}**",
+                    color=discord.Color.purple()
+                )
+                if user and user.avatar:
+                    e.set_thumbnail(url=user.avatar.url)
+                else:
+                    e.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/168/168726.png")
+
+                embeds.append(e)
+            return embeds
+
+        async def _mostrar(self, interaction: discord.Interaction):
+            embeds = await self._gerar_embeds()
+            self.first_button.disabled = self.prev_button.disabled = (self.ind == 0)
+            self.next_button.disabled = self.last_button.disabled = (self.ind == len(paginas) - 1)
+            await interaction.response.edit_message(embeds=embeds, view=self)
+
+        @discord.ui.button(label='⏮', style=discord.ButtonStyle.grey)
+        async def first_button(self, interaction: discord.Interaction, _):
+            self.ind = 0
+            await self._mostrar(interaction)
+
+        @discord.ui.button(label='◀', style=discord.ButtonStyle.grey)
+        async def prev_button(self, interaction: discord.Interaction, _):
+            if self.ind > 0:
+                self.ind -= 1
+            await self._mostrar(interaction)
+
+        @discord.ui.button(label='▶', style=discord.ButtonStyle.grey)
+        async def next_button(self, interaction: discord.Interaction, _):
+            if self.ind < len(paginas) - 1:
+                self.ind += 1
+            await self._mostrar(interaction)
+
+        @discord.ui.button(label='⏭', style=discord.ButtonStyle.grey)
+        async def last_button(self, interaction: discord.Interaction, _):
+            self.ind = len(paginas) - 1
+            await self._mostrar(interaction)
+
+    view = Paginador()
+    embeds_iniciais = await view._gerar_embeds()
+    await ctx.send(embeds=embeds_iniciais, view=view)
+
+
+# === COMANDO: REMOVER ANIVERSÁRIO ===
+@bot.command()
+async def removeraniversario(ctx):
+    resultado = collection.delete_one({"id": ctx.author.id})
+    if resultado.deleted_count > 0:
+        msg = "🗑️ Seu aniversário foi removido!"
+        cor = discord.Color.orange()
+    else:
+        msg = "❌ Você não tinha aniversário registrado!"
+        cor = discord.Color.red()
+
+    await ctx.send(embed=discord.Embed(title=msg, color=cor))
+
+
+# === COMANDO: PRÓXIMO ANIVERSÁRIO ===
+@bot.command()
+async def proximoaniversario(ctx):
+    agora = datetime.now(fuso_brasilia)
+    hoje = agora.strftime("%d/%m")
+
+    aniversarios = list(collection.find({}))
+    if not aniversarios:
+        await ctx.send(embed=discord.Embed(
+            title="🎂 Nenhum aniversário registrado!",
+            color=discord.Color.red()
+        ))
+        return
+
+    datas = []
+    for i in aniversarios:
+        d = datetime.strptime(i["data"], "%d/%m").replace(year=agora.year)
+        if d < agora:
+            d = d.replace(year=agora.year + 1)
+        datas.append((i, d))
+
+    proximo = min(datas, key=lambda x: x[1])
+    dias_restantes = (proximo[1] - agora).days
+
+    e = discord.Embed(
+        title="🎉 Próximo aniversário!",
+        description=f"**{proximo[0]['nome']}** 🎂 em **{proximo[0]['data']}**\nFaltam **{dias_restantes} dias**!",
+        color=discord.Color.gold()
+    )
+    await ctx.send(embed=e)
+
+
+# === TAREFA AUTOMÁTICA DE PARABÉNS ===
+@tasks.loop(hours=24)
+async def verificar_aniversarios():
+    agora = datetime.now(fuso_brasilia)
+    data_hoje = agora.strftime("%d/%m")
+
+    aniversariantes = list(collection.find({"data": data_hoje}))
+    if aniversariantes:
+        canal = bot.get_channel(CANAL_PARABENS_ID)
+        if canal:
+            for pessoa in aniversariantes:
+                user = canal.guild.get_member(pessoa["id"])
+                if user:
+                    e = discord.Embed(
+                        title=f"🎉 Feliz aniversário, {user.display_name}!",
+                        description="Espero que tenha um dia incrível! 🎂",
+                        color=discord.Color.random()
+                    )
+                    e.set_thumbnail(url=user.avatar.url if user.avatar else None)
+                    await canal.send(content=f"🎈 {user.mention}", embed=e)
+    print(f"Verificação diária executada em {data_hoje}")
+
+
+# === COMANDO: PING ===
+@bot.command()
+async def ping(ctx):
+    await ctx.send(embed=discord.Embed(
+        title="🏓 Pong!",
+        description=f"Latência: `{round(bot.latency * 1000)}ms`",
+        color=discord.Color.blurple()
+    ))
+
+
+# === INICIAR BOT ===
+TOKEN = os.getenv("DISCORD_TOKEN")
+bot.run(TOKEN)
