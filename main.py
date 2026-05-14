@@ -1,15 +1,14 @@
 import discord
 import os
-import json
 import asyncio
 import datetime
 from datetime import timezone, timedelta
 from flask import Flask
 from threading import Thread
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure
+from discord.ext import tasks
 
-# --- KEEP ALIVE ---
+# --- MANTENDO O BOT ONLINE (KEEP ALIVE) ---
 app = Flask('')
 
 @app.route('/')
@@ -17,189 +16,160 @@ def home():
     return "PowerNiver bot está rodando! 🎉"
 
 def keep_alive():
+    # Roda o servidor Flask em uma thread separada
     Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': 8080}).start()
 
-# --- DISCORD BOT ---
-
+# --- CONFIGURAÇÃO DO BANCO DE DADOS (MONGODB) ---
 MONGO_URI = os.getenv("MONGO_URI")
+db_client = MongoClient(MONGO_URI)
+db = db_client["powerniver_db"]
+db_collection_aniversarios = db["aniversarios"]
+db_collection_config = db["config"]
 
-db_client = None 
-db_collection_aniversarios = None
-db_collection_config = None
-
-def connect_to_mongodb():
-    global db_client, db_collection_aniversarios, db_collection_config
-    try:
-        if not MONGO_URI:
-            print("❌ Erro: Variável de ambiente MONGO_URI não configurada!")
-            return False
-
-        db_client = MongoClient(MONGO_URI)
-        db_client.admin.command('ping')
-        print("✅ Conectado ao MongoDB Atlas!")
-        db = db_client["powerniver_db"]
-        db_collection_aniversarios = db["aniversarios"]
-        db_collection_config = db["config"]
-        return True
-    except Exception as e:
-        print(f"❌ Erro ao conectar ao MongoDB: {e}")
-        return False
-
-connect_to_mongodb()
-
+# --- CONFIGURAÇÃO DO BOT (DISCORD) ---
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True 
-intents.presences = True
+intents.members = True  # LEMBRE-SE: Ative "Server Members Intent" no Developer Portal!
 
-client = discord.Client(intents=intents, member_cache_flags=discord.MemberCacheFlags.all())
+client = discord.Client(intents=intents)
 
-# Função utilitária global para facilitar a criação de embeds
 def criar_embed(titulo, descricao, cor=discord.Color.purple()):
     return discord.Embed(title=titulo, description=descricao, color=cor)
 
-# --- TAREFA DE CHECAGEM ---
-async def checar_aniversarios():
-    await client.wait_until_ready()
-    while not client.is_closed():
-        if db_client is None:
-            if not connect_to_mongodb():
-                await asyncio.sleep(60)
-                continue
+# --- TAREFA AUTOMÁTICA DE CHECAGEM ---
+@tasks.loop(minutes=30)
+async def rotina_aniversarios():
+    """Verifica se há aniversariantes e envia mensagens nos canais configurados."""
+    fuso = timezone(timedelta(hours=-3)) # Horário de Brasília
+    hoje = datetime.datetime.now(fuso).strftime("%d/%m")
+    
+    configs = db_collection_config.find({})
+    for config in configs:
+        guild_id = config["_id"]
+        canal_id = config.get("channel_id")
+        last_date = config.get("last_announcement_date")
 
-        fuso_horario_brasilia = timezone(timedelta(hours=-3))
-        hoje = datetime.datetime.now(fuso_horario_brasilia)
-        data_hoje = hoje.strftime("%d/%m")
-
-        try:
-            aniversarios = {doc['_id']: doc for doc in db_collection_aniversarios.find({})}
-            configuracoes = {doc['_id']: doc for doc in db_collection_config.find({})}
-        except Exception as e:
-            print(f"❌ Erro DB: {e}")
-            await asyncio.sleep(60)
+        # Evita anunciar mais de uma vez no mesmo dia
+        if not canal_id or last_date == hoje:
             continue
 
-        for guild in client.guilds:
-            guild_id = str(guild.id)
-            guild_config = configuracoes.get(guild_id, {})
-            canal_id = guild_config.get("channel_id")
-            last_announcement_date = guild_config.get("last_announcement_date")
+        guild = client.get_guild(int(guild_id))
+        if not guild: continue
+        
+        canal = guild.get_channel(int(canal_id))
+        if not canal: continue
 
-            if not canal_id or last_announcement_date == data_hoje:
-                continue
+        # Busca todos os aniversariantes registrados para hoje
+        aniversariantes = db_collection_aniversarios.find({"data": hoje})
+        
+        achou_alguem = False
+        for niver in aniversariantes:
+            user_id = int(niver["_id"])
+            member = guild.get_member(user_id)
+            
+            if member:
+                achou_alguem = True
+                embed = criar_embed(
+                    f"🎉 Feliz Aniversário, {niver['nome']}! 🎂", 
+                    f"Hoje celebramos o dia de {member.mention}! ✨", 
+                    discord.Color.gold()
+                )
+                embed.set_thumbnail(url=member.display_avatar.url)
+                await canal.send(content=f"Parabéns, {member.mention}!", embed=embed)
 
-            canal = client.get_channel(int(canal_id))
-            if not canal:
-                continue
+        if achou_alguem:
+            db_collection_config.update_one({"_id": guild_id}, {"$set": {"last_announcement_date": hoje}})
 
-            try:
-                await guild.chunk()
-            except:
-                continue
-
-            achou = False
-            for user_id, info in aniversarios.items():
-                member = guild.get_member(int(user_id))
-                if member and info["data"] == data_hoje:
-                    achou = True
-                    embed = criar_embed(f"🎉 Feliz Aniversário, {info['nome']}! 🎂", 
-                                        f"Hoje celebramos o dia de {member.mention}! ✨", 
-                                        discord.Color.gold())
-                    embed.set_thumbnail(url=member.display_avatar.url)
-                    await canal.send(content=f"Parabéns, {member.mention}!", embed=embed)
-
-            db_collection_config.update_one({"_id": guild_id}, {"$set": {"last_announcement_date": data_hoje}}, upsert=True)
-
-        await asyncio.sleep(3600)
-
+# --- EVENTOS E COMANDOS ---
 @client.event
 async def on_ready():
     print(f'✅ Bot conectado como {client.user}')
-    client.loop.create_task(checar_aniversarios())
+    if not rotina_aniversarios.is_running():
+        rotina_aniversarios.start()
 
 @client.event
 async def on_message(message):
-    if message.author == client.user:
+    if message.author.bot:
         return
 
-    if db_client is None:
-        return
-
-    # --- COMANDO: p!help ---
+    # p!help
     if message.content == "p!help":
-        embed = criar_embed("📚 Guia de Comandos - PowerNiver", "Aqui estão as funções disponíveis:")
+        embed = criar_embed("📚 Guia de Comandos", "Funções do PowerNiver:")
         embed.add_field(name="🎂 `p!aniversario DD/MM`", value="Registra seu aniversário.", inline=False)
-        embed.add_field(name="📅 `p!aniversariantes`", value="Lista todos os aniversários do servidor.", inline=False)
-        embed.add_field(name="⏳ `p!proximoaniversario`", value="Mostra quem é o próximo a fazer festa.", inline=False)
-        embed.add_field(name="🗑️ `p!removeraniversario`", value="Remove seus dados do bot.", inline=False)
+        embed.add_field(name="👤 `p!addaniversario @user DD/MM`", value="**(ADM)** Registra o niver de outro membro.", inline=False)
+        embed.add_field(name="📅 `p!aniversariantes`", value="Lista os aniversários salvos.", inline=False)
         embed.add_field(name="🛠️ `p!setcanal #canal`", value="**(ADM)** Define onde os avisos serão enviados.", inline=False)
-        embed.add_field(name="👤 `p!addaniversario @user DD/MM`", value="**(ADM)** Registra o niver de outra pessoa.", inline=False)
-        embed.add_field(name="🏓 `p!ping`", value="Checa a latência.", inline=False)
-        embed.set_footer(text="Use sempre o formato Dia/Mês (ex: 15/03)")
+        embed.add_field(name="🏓 `p!ping`", value="Verifica a latência.", inline=False)
         await message.channel.send(embed=embed)
 
     # p!ping
     if message.content == "p!ping":
-        await message.channel.send(embed=criar_embed("Pong", "O bot está respondendo! ✅", discord.Color.green()))
+        latencia = round(client.latency * 1000)
+        await message.channel.send(f"🏓 Pong! ({latencia}ms)")
 
-    # p!aniversario
+    # p!aniversario (Auto-registro)
     if message.content.startswith("p!aniversario"):
         partes = message.content.split()
         if len(partes) != 2:
-            return await message.channel.send(embed=criar_embed("Erro", "Use: `p!aniversario DD/MM`", discord.Color.red()))
+            return await message.channel.send("❌ Use: `p!aniversario DD/MM` (Ex: 15/08)")
         
         data = partes[1]
-        try:
-            db_collection_aniversarios.update_one(
-                {"_id": str(message.author.id)},
-                {"$set": {"nome": message.author.display_name, "data": data}},
-                upsert=True
-            )
-            await message.channel.send(embed=criar_embed("Sucesso", f"🎉 Aniversário de {message.author.mention} salvo para {data}!", discord.Color.green()))
-        except Exception as e:
-            await message.channel.send(f"Erro: {e}")
+        db_collection_aniversarios.update_one(
+            {"_id": str(message.author.id)},
+            {"$set": {"nome": message.author.display_name, "data": data}},
+            upsert=True
+        )
+        await message.channel.send(f"🎉 {message.author.mention}, seu aniversário foi salvo para **{data}**!")
+
+    # p!addaniversario (Para ADMs, conforme a imagem image_bc5fdd.png)
+    if message.content.startswith("p!addaniversario"):
+        if not message.author.guild_permissions.administrator:
+            return await message.channel.send("❌ Apenas administradores podem usar este comando.")
+
+        partes = message.content.split()
+        if len(partes) < 3 or not message.mentions:
+            return await message.channel.send("❌ Use: `p!addaniversario @usuario DD/MM`")
+
+        usuario_alvo = message.mentions[0]
+        data = partes[-1] # Pega a última parte do texto (a data)
+
+        db_collection_aniversarios.update_one(
+            {"_id": str(usuario_alvo.id)},
+            {"$set": {"nome": usuario_alvo.display_name, "data": data}},
+            upsert=True
+        )
+        embed = criar_embed("Sucesso!", f"✅ O aniversário de {usuario_alvo.mention} foi definido para **{data}**.", discord.Color.green())
+        await message.channel.send(embed=embed)
 
     # p!aniversariantes
     if message.content == "p!aniversariantes":
-        aniversarios = list(db_collection_aniversarios.find({}))
-        if not aniversarios:
-            return await message.channel.send("Nenhum registro encontrado.")
-        
+        registros = db_collection_aniversarios.find({})
         lista = []
-        for n in aniversarios:
-            if message.guild.get_member(int(n["_id"])):
-                lista.append(f"• **{n['nome']}** - {n['data']}")
+        for r in registros:
+            # Mostra apenas quem está neste servidor
+            if message.guild.get_member(int(r["_id"])):
+                lista.append(f"• **{r['nome']}** - {r['data']}")
         
-        embed = criar_embed("📅 Lista de Aniversários", "\n".join(lista) if lista else "Ninguém deste servidor registrado.")
-        await message.channel.send(embed=embed)
-
-    # p!removeraniversario
-    if message.content == "p!removeraniversario":
-        db_collection_aniversarios.delete_one({"_id": str(message.author.id)})
-        await message.channel.send(embed=criar_embed("Removido", "🗑️ Seus dados foram apagados.", discord.Color.green()))
-
-    # p!proximoaniversario
-    if message.content == "p!proximoaniversario":
-        # Lógica simplificada: busca todos e filtra no código
-        aniversarios = list(db_collection_aniversarios.find({}))
-        # (Aqui você pode manter a lógica de cálculo de dias que você já tinha no seu código)
-        await message.channel.send("🔎 Calculando próximo aniversário...")
-
-    # p!addaniversario
-    if message.content.startswith("p!addaniversario"):
-        if not message.author.guild_permissions.administrator:
-            return await message.channel.send("Apenas ADMs!")
-        # ... (restante da sua lógica de addaniversario)
+        desc = "\n".join(lista) if lista else "Nenhum registro encontrado."
+        await message.channel.send(embed=criar_embed("📅 Lista de Aniversários", desc))
 
     # p!setcanal
     if message.content.startswith("p!setcanal"):
         if not message.author.guild_permissions.administrator:
-            return await message.channel.send("Apenas ADMs!")
+            return await message.channel.send("❌ Sem permissão de Administrador.")
+        
         if message.channel_mentions:
             canal = message.channel_mentions[0]
-            db_collection_config.update_one({"_id": str(message.guild.id)}, {"$set": {"channel_id": str(canal.id)}}, upsert=True)
-            await message.channel.send(f"✅ Canal definido: {canal.mention}")
+            db_collection_config.update_one(
+                {"_id": str(message.guild.id)}, 
+                {"$set": {"channel_id": str(canal.id)}}, 
+                upsert=True
+            )
+            await message.channel.send(f"✅ Os avisos de aniversário serão enviados em {canal.mention}")
 
-# --- EXECUÇÃO ---
-keep_alive()
-client.run(os.getenv("DISCORD_TOKEN"))
+# --- EXECUÇÃO DO BOT ---
+keep_alive() # Inicia o Flask
+try:
+    client.run(os.getenv("DISCORD_TOKEN"))
+except Exception as e:
+    print(f"❌ Erro fatal ao iniciar o bot: {e}")
